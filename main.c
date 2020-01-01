@@ -94,8 +94,17 @@ typedef unsigned char uint8_t;
 void send_str(char *);
 void echo(char);
 // global vars
-char echo_mode;
+char echo_mode = true;
 char cmd[128];
+char write_buf[64];
+int write_buf_size;
+char write_page_mode = true;
+#define MODE_CMD    0
+#define MODE_READ   1
+#define MODE_WRITE  2
+char run_mode = MODE_CMD;
+uint16_t cur_write_addr;
+uint16_t end_write_addr;
 
 // shift register routines
 void send(uint8_t *, uint8_t);
@@ -130,7 +139,6 @@ int main(void)
     UCA0CTL1 &= ~UCSWRST;                     // **Initialize USCI state machine**
     IE2 |= UCA0RXIE;                          // Enable USCI_A0 RX interrupt
 
-    echo_mode = true;
     send_str("\r\nready>");
 
     __bis_SR_register(LPM0_bits + GIE);       // Enter LPM0, interrupts enabled
@@ -142,113 +150,197 @@ __interrupt void USCI0RX_ISR(void)
 {
     char buf[64];
     char rx_char = UCA0RXBUF;
-    if(echo_mode) echo(rx_char);
     uint16_t start_addr;
     uint16_t end_addr;
-    char page_mode;
     int len;
+    int i;
 
-    // If newline (return) key, execute command
-    // as specified in cmd var
-    if(rx_char == 0x0d) {
-        send_str("\n\r");
-        if(strncmp(cmd, "echo", 4) == 0) {
-            if(strcmp(cmd, "echo on") == 0) {
-                echo_mode = true;
+    switch(run_mode) {
+        case MODE_CMD:
+            if(echo_mode) echo(rx_char);
+            // If newline (return) key, execute command
+            // as specified in cmd var
+            if(rx_char == 0x0d) {
+                send_str("\n\r");
+                if(strncmp(cmd, "echo", 4) == 0) {
+                    if(strcmp(cmd, "echo on") == 0) {
+                        echo_mode = true;
+                    }
+                    else if(strcmp(cmd, "echo off") == 0) {
+                        echo_mode = false;
+                    }
+                    else {
+                        if(echo_mode)
+                            sprintf(buf, "Current echo mode: %d (true)\r\n", echo_mode);
+                        else
+                            sprintf(buf, "Current echo mode: %d (false)\r\n", echo_mode);
+                        send_str(buf);
+                    }
+                }
+                else if(strncmp(cmd, "read", 4) == 0) {
+                    if(strlen(cmd) != 18) {
+                        sprintf(buf, "Invalid read command: wrong length: %d, expecting 18\r\n", strlen(cmd));
+                        send_str(buf);
+                        goto ready;
+                    }
+                    // read 0xabcd 0xef01
+                    // 0      ^7     ^14
+                    start_addr = strtoul(&cmd[7], 0, 16);
+                    end_addr = strtoul(&cmd[14], 0, 16);
+                    if(start_addr == 0 && strncmp(&cmd[7], "0000", 4) != 0) {
+                        send_str("Invalid read command: cannot parse start addr\r\n");
+                        goto ready;
+                    }
+                    if(end_addr == 0 && strncmp(&cmd[14], "0000", 4) != 0) {
+                        send_str("Invalid read command: cannot parse end addr\r\n");
+                        goto ready;
+                    }
+                    if(start_addr > end_addr) {
+                        send_str("Invalid read command: start-addr > end-addr\r\n");
+                        goto ready;
+                    }
+                    sprintf(buf, "Start addr: %04x (%d)\r\n", start_addr, start_addr);
+                    send_str(buf);
+                    sprintf(buf, "End addr: %04x (%d)\r\n", end_addr, end_addr);
+                    send_str(buf);
+                    sprintf(buf, "Sending %d bytes now...\r\n", end_addr - start_addr);
+                    send_str(buf);
+                    run_mode = MODE_READ;
+                    for(i=start_addr; i<=end_addr; i++) {
+                        sprintf(buf, "0x%04x\r\n", i);
+                        send_str(buf);
+                    }
+                    run_mode = MODE_CMD;
+                }
+                else if(strncmp(cmd, "write", 5) == 0) {
+                    len = strlen(cmd);
+                    if(len != 19 && len != 24 && len != 26) {
+                        sprintf(buf, "Invalid write command: wrong length: %d, expecting 19, 24, or 26\r\n", len);
+                        send_str(buf);
+                        goto ready;
+                    }
+                    // write 0xabcd 0xef01 nopage
+                    // 0       ^8     ^15  ^20
+                    start_addr = strtoul(&cmd[8], 0, 16);
+                    end_addr = strtoul(&cmd[15], 0, 16);
+                    if(start_addr == 0 && strncmp(&cmd[8], "0000", 4) != 0) {
+                        send_str("Invalid write command: cannot parse start addr\r\n");
+                        goto ready;
+                    }
+                    if(end_addr == 0 && strncmp(&cmd[15], "0000", 4) != 0) {
+                        send_str("Invalid write command: cannot parse end addr\r\n");
+                        goto ready;
+                    }
+                    if(start_addr > end_addr) {
+                        send_str("Invalid write command: start-addr > end-addr\r\n");
+                        goto ready;
+                    }
+                    if(len == 19 || strcmp(&cmd[20], "page") == 0) {
+                        write_page_mode = true;
+                    }
+                    else if(strcmp(&cmd[20], "nopage") == 0) {
+                        write_page_mode = false;
+                    }
+                    else {
+                        send_str("Invalid write command: page/nopage not parsed\r\n");
+                        goto ready;
+                    }
+
+                    sprintf(buf, "Start addr: %04x (%d)\r\n", start_addr, start_addr);
+                    send_str(buf);
+                    sprintf(buf, "End addr: %04x (%d)\r\n", end_addr, end_addr);
+                    send_str(buf);
+                    sprintf(buf, "Total bytes to write: %d\r\n", end_addr - start_addr + 1);
+                    send_str(buf);
+                    if(write_page_mode) {
+                        send_str("Paging\r\n");
+                        // Compute the size of the first page
+                        len = 64 - (start_addr % 64);
+                        if(len == 0) len = 64; // start addr is on a boundary
+                        if(start_addr + len > end_addr)
+                            sprintf(buf, "Send %d bytes, %d remaining...\r\n", end_addr - start_addr + 1, end_addr - start_addr + 1);
+                        else
+                            sprintf(buf, "Send %d bytes, %d remaining...\r\n", len, end_addr - start_addr + 1);
+                        send_str(buf);
+                    }
+                    else {
+                        send_str("No Paging\r\n");
+                        sprintf(buf, "Send %d bytes, %d remaining...\r\n", 1, end_addr - start_addr + 1);
+                        send_str(buf);
+                    }
+                    cur_write_addr = start_addr;
+                    end_write_addr = end_addr;
+                    write_buf_size = 0;
+                    run_mode = MODE_WRITE;
+                }
+                else {
+                    sprintf(buf, "Invalid Command: %s\r\n", cmd);
+                    send_str(buf);
+                }
+                ready:
+                strcpy(cmd, "");
+                if(run_mode == MODE_CMD)
+                    send_str("ready>");
             }
-            else if(strcmp(cmd, "echo off") == 0) {
-                echo_mode = false;
+            // Otherwise, append to cmd
+            else {
+                strncat(cmd, &UCA0RXBUF, 1);
+            }
+            break;
+        case MODE_READ:
+            break;
+        case MODE_WRITE:
+            if(write_page_mode) {
+                write_buf[write_buf_size] = UCA0RXBUF;
+                //sprintf(buf, "Cached byte %02x for writing\r\n", write_buf[write_buf_size]);
+                //send_str(buf);
+                write_buf_size++;
+                // Write out our buffered data if...
+                // * the buffer is full, or
+                // * we are at the end of our data stream, or
+                // * a 64-byte boundary appears in the buffer (this aligns the following writes to pages)
+                if(write_buf_size == 64 
+                        || cur_write_addr + write_buf_size > end_write_addr
+                        || (cur_write_addr + write_buf_size) % 64 == 0
+                        ) {
+                    sprintf(buf, "Writing page of %d bytes starting at 0x%04x\r\n", write_buf_size, cur_write_addr);
+                    send_str(buf);
+                    for(i=0; i<write_buf_size; i++) {
+                        sprintf(buf, "%04x = %02x\r\n", cur_write_addr, write_buf[i]);
+                        send_str(buf);
+                        cur_write_addr++;
+                    }
+                    send_str("Pausing 10ms\r\n");
+                    __delay_cycles(200000); // 200k cycles @ 16MHz => 12.5ms
+                    write_buf_size = 0;
+
+                    if(cur_write_addr <= end_write_addr) {
+                        // Compute the size of the next page
+                        len = 64 - (cur_write_addr % 64);
+                        if(len == 0) len = 64; // cur_write_addr is on a boundary
+                        if(cur_write_addr + len > end_write_addr)
+                            sprintf(buf, "Send %d bytes, %d remaining...\r\n", end_write_addr - cur_write_addr + 1, end_write_addr - cur_write_addr + 1);
+                        else
+                            sprintf(buf, "Send %d bytes, %d remaining...\r\n", len, end_write_addr - cur_write_addr + 1);
+                        send_str(buf);
+                    }
+                }
             }
             else {
-                if(echo_mode)
-                    sprintf(buf, "Current echo mode: %d (true)\r\n", echo_mode);
-                else
-                    sprintf(buf, "Current echo mode: %d (false)\r\n", echo_mode);
+                sprintf(buf, "Writing byte %02x to addr 0x%04x\r\n", UCA0RXBUF, cur_write_addr);
+                send_str(buf);
+                cur_write_addr++;
+                send_str("Pausing 10ms\r\n");
+                __delay_cycles(200000); // 200k cycles @ 16MHz => 12.5ms
+                sprintf(buf, "Send %d bytes, %d remaining...\r\n", 1, end_write_addr - cur_write_addr + 1);
                 send_str(buf);
             }
-        }
-        else if(strncmp(cmd, "read", 4) == 0) {
-            if(strlen(cmd) != 18) {
-                sprintf(buf, "Invalid read command: wrong length: %d, expecting 18\r\n", strlen(cmd));
-                send_str(buf);
-                goto ready;
+            if(cur_write_addr > end_write_addr) {
+                run_mode = MODE_CMD;
+                send_str("ready>");
             }
-            // read 0xabcd 0xef01
-            // 0      ^7     ^14
-            start_addr = strtoul(&cmd[7], 0, 16);
-            end_addr = strtoul(&cmd[14], 0, 16);
-            if(start_addr == 0 && strncmp(&cmd[7], "0000", 4) != 0) {
-                send_str("Invalid read command: cannot parse start addr\r\n");
-                goto ready;
-            }
-            if(end_addr == 0 && strncmp(&cmd[14], "0000", 4) != 0) {
-                send_str("Invalid read command: cannot parse end addr\r\n");
-                goto ready;
-            }
-            if(start_addr > end_addr) {
-                send_str("Invalid read command: start-addr > end-addr\r\n");
-                goto ready;
-            }
-            sprintf(buf, "Start addr: %04x (%d)\r\n", start_addr, start_addr);
-            send_str(buf);
-            sprintf(buf, "End addr: %04x (%d)\r\n", end_addr, end_addr);
-            send_str(buf);
-        }
-        else if(strncmp(cmd, "write", 5) == 0) {
-            len = strlen(cmd);
-            if(len != 19 && len != 24 && len != 26) {
-                sprintf(buf, "Invalid write command: wrong length: %d, expecting 19, 24, or 26\r\n", len);
-                send_str(buf);
-                goto ready;
-            }
-            // write 0xabcd 0xef01 nopage
-            // 0       ^8     ^15  ^20
-            start_addr = strtoul(&cmd[8], 0, 16);
-            end_addr = strtoul(&cmd[15], 0, 16);
-            if(start_addr == 0 && strncmp(&cmd[8], "0000", 4) != 0) {
-                send_str("Invalid write command: cannot parse start addr\r\n");
-                goto ready;
-            }
-            if(end_addr == 0 && strncmp(&cmd[15], "0000", 4) != 0) {
-                send_str("Invalid write command: cannot parse end addr\r\n");
-                goto ready;
-            }
-            if(start_addr > end_addr) {
-                send_str("Invalid write command: start-addr > end-addr\r\n");
-                goto ready;
-            }
-            if(len == 19 || strcmp(&cmd[20], "page") == 0) {
-                page_mode = true;
-            }
-            else if(strcmp(&cmd[20], "nopage") == 0) {
-                page_mode = false;
-            }
-            else {
-                send_str("Invalid write command: page/nopage not parsed\r\n");
-                goto ready;
-            }
-
-            sprintf(buf, "Start addr: %04x (%d)\r\n", start_addr, start_addr);
-            send_str(buf);
-            sprintf(buf, "End addr: %04x (%d)\r\n", end_addr, end_addr);
-            send_str(buf);
-            if(page_mode)
-                send_str("Paging\r\n");
-            else
-                send_str("No Paging\r\n");
-        }
-        else {
-            sprintf(buf, "Invalid Command: %s\r\n", cmd);
-            send_str(buf);
-        }
-ready:
-        send_str("ready>");
-        strcpy(cmd, "");
-    }
-    // Otherwise, append to cmd
-    else {
-        strncat(cmd, &UCA0RXBUF, 1);
-    }
+            break;
+    } // end switch
 }
 
 // Echos the RXBUF back to the client
@@ -270,7 +362,6 @@ void send_str(char *str) {
 }
 
 void send(uint8_t *data_arr, uint8_t count) {
-
     uint8_t SER;
     uint8_t SRCLK;
     uint8_t RCLK;
@@ -334,5 +425,4 @@ void send_data(uint16_t send_addr, uint8_t send_data) {
     send(to_send, 3);
     return;
 }
-
 
