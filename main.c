@@ -164,10 +164,23 @@ int main(void)
             cmd_read();
         else if(strncmp(cmd, "write", 5) == 0)
             cmd_write();
+        else if(strncmp(cmd, "help", 4) == 0)
+            cmd_help();
         else
             send_str("Invalid command\r\n");
         strcpy(cmd, "");
     }
+}
+
+// Help command
+void cmd_help() {
+    send_str("help: this help information\r\n");
+    send_str("echo {on,off}: display, enable, disable echo\r\n");
+    send_str("read 0xabcd 0xef01: read bytes from start to end addr, inclusive\r\n");
+    send_str("write 0xabcd 0xef01 {nopage}: write bytes from start to end addr.\r\n");
+    send_str("  If nopage, bytes will be written individually with 10ms pauses\r\n");
+    send_str("  between each byte. By default, will RX bytes up to next 64-byte\r\n");
+    send_str("  boundary and write up to 64 bytes as a page.\r\n");
 }
 
 // Echo command: change echo_mode
