@@ -54,9 +54,9 @@
 //    |7654 3210|
 //    |flag (8b)|
 //         
-//     flag[0]/Qa = ~WE
-//     flag[1]/Qb = ~OE
-//     flag[2]/Qc = ~CE
+//     flag[0]/Qc = ~CE _CE
+//     flag[1]/Qb = ~OE _OE
+//     flag[2]/Qa = ~WE R_W
 //
 //
 //******************************************************************************
@@ -93,9 +93,9 @@
 #define F_OUT    RCLK_F+SRCLK_F+SER_F
 #define SENDMODE_FLAG 1
 // Flag bits
-#define R_W      BIT0
+#define _CE      BIT0
 #define _OE      BIT1
-#define _CE      BIT2
+#define R_W      BIT2
 // Port 1 - address
 #define RCLK_A   BIT6
 #define SER_A    BIT5
@@ -438,9 +438,9 @@ void cmd_write() {
 
     // Set the EEPROM flags to a known state
     // R_W high (strobe low to write)
-    // _OE low  (data pins are inputs)
+    // _OE high (data pins are inputs)
     // _CE low  (chip enabled)
-    eeprom_flags = R_W;
+    eeprom_flags = R_W + _OE;
     send_flags(eeprom_flags);
     // Enable the data shift register's outputs
     // by pulling its _OE pin low
@@ -472,10 +472,13 @@ void cmd_write() {
 
         sprintf(buf, "Writing %d bytes starting at 0x%04x\r\n", write_buf_target_size, cur_write_addr);
         send_str(buf);
+        // XXX Remove this when complete
         for(int i=0; i<write_buf_idx; i++) {
             sprintf(buf, "%04x = %02x\r\n", cur_write_addr, write_buf[i]);
             send_str(buf);
-
+        }
+        // XXX end
+        for(int i=0; i<write_buf_idx; i++) {
             // Set address and data
             send_addr(cur_write_addr);
             send_data(write_buf[i]);
@@ -487,7 +490,7 @@ void cmd_write() {
 
             cur_write_addr++;
         }
-        send_str("Pausing 10ms\r\n");
+        send_str("Pausing 10ms\r\n"); // XXX remove this when complete
         __delay_cycles(200000); // 200k cycles @ 16MHz => 12.5ms
     }
 
@@ -497,6 +500,13 @@ void cmd_write() {
     // Disable the data shift register's outputs
     // by pulling its _OE pin high
     P2OUT |= OE_DOUT;
+
+    // Set the EEPROM flags to a known state
+    // R_W high (strobe low to write)
+    // _OE high (data pins are inputs)
+    // _CE low  (chip enabled)
+    eeprom_flags = R_W + _OE;
+    send_flags(eeprom_flags);
 }
 
 // Serial data RX interrupt
@@ -571,28 +581,26 @@ void shiftreg_send(uint8_t *data_arr, uint8_t sendmode) {
     uint8_t SER;
     uint8_t SRCLK;
     uint8_t RCLK;
-    uint16_t PORT;
     uint8_t count = 1;
     uint8_t max_bit = 7;
+    uint8_t port = 1;
     switch(sendmode) {
         case SENDMODE_FLAG:
             SER = SER_F;
             SRCLK = SRCLK_F;
             RCLK = RCLK_F;
-            PORT = P1OUT;
             max_bit = 2;
             break;
         case SENDMODE_DATA:
             SER = SER_DOUT;
             SRCLK = SRCLK_DOUT;
             RCLK = RCLK_DOUT;
-            PORT = P2OUT;
+            port = 2;
             break;
         case SENDMODE_ADDR:
             SER = SER_A;
             SRCLK = SRCLK_A;
             RCLK = RCLK_A;
-            PORT = P1OUT;
             count = 2;
             break;
     }
@@ -604,15 +612,29 @@ void shiftreg_send(uint8_t *data_arr, uint8_t sendmode) {
         uint8_t this_byte = data_arr[idx];
         for(uint8_t bit = 0; bit <= max_bit; bit++) {
             // Put this bit on the serial input
-            if(this_byte & mask)
-                PORT |= SER;
-            else
-                PORT &= ~SER;
+            if(this_byte & mask) {
+                if(port == 1)
+                    P1OUT |= SER;
+                else
+                    P2OUT |= SER;
+            }
+            else {
+                if(port == 1)
+                    P1OUT &= ~SER;
+                else
+                    P2OUT &= ~SER;
+            }
 
             // Strobe the SRCLK to shift
             // this bit into the shift register
-            PORT |= SRCLK;
-            PORT &= ~SRCLK;
+            if(port == 1) {
+                P1OUT |= SRCLK;
+                P1OUT &= ~SRCLK;
+            }
+            else {
+                P2OUT |= SRCLK;
+                P2OUT &= ~SRCLK;
+            }
 
             // Shift our mask to the next bit
             mask = mask << 1;
@@ -620,12 +642,23 @@ void shiftreg_send(uint8_t *data_arr, uint8_t sendmode) {
     }
 
     // reset SER
-    PORT &= ~SER;
+    if(port == 1) {
+        P1OUT &= ~SER;
+    }
+    else {
+        P2OUT &= ~SER;
+    }
 
     // Strobe the RCLK to load the shifted
     // data into the output register
-    PORT |= RCLK;
-    PORT &= ~RCLK;
+    if(port == 1) {
+        P1OUT |= RCLK;
+        P1OUT &= ~RCLK;
+    }
+    else {
+        P2OUT |= RCLK;
+        P2OUT &= ~RCLK;
+    }
 
     return;
 }
