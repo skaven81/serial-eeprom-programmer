@@ -11,8 +11,17 @@ exit
 endef
 export RUN_COMMANDS
 
+define PROG_COMMANDS
+prog msp430.hex
+exit
+endef
+export PROG_COMMANDS
+
 run: msp430.hex
-	 echo "$$RUN_COMMANDS" | mspdebug rf2500
+	echo "$$RUN_COMMANDS" | mspdebug rf2500
+
+program: msp430.hex
+	echo "$$PROG_COMMANDS" | mspdebug rf2500
 
 debug: msp430.hex
-	 mspdebug rf2500
+	mspdebug rf2500
