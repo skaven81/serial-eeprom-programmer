@@ -90,6 +90,7 @@
 #define RCLK_F   BIT3
 #define SRCLK_F  BIT4
 #define SER_F    BIT0
+#define F_OUT    RCLK_F+SRCLK_F+SER_F
 #define SENDMODE_FLAG 1
 // Flag bits
 #define R_W      BIT0
@@ -97,20 +98,24 @@
 #define _CE      BIT2
 // Port 1 - address
 #define RCLK_A   BIT6
-#define SER_A    BIT7
-#define SRCLK_A  BIT5
+#define SER_A    BIT5
+#define SRCLK_A  BIT7
+#define A_OUT    RCLK_A+SRCLK_A+SER_A
 #define SENDMODE_ADDR 2
 
 // Port 2 - data in
 #define DIN_QH   BIT0
 #define DIN_CLK  BIT1
 #define DIN_SHLD BIT2
+#define DIN_OUT  DIN_CLK+DIN_SHLD
+#define DIN_IN   DIN_QH
 
 // Port 2 - data out
 #define SER_DOUT   BIT3
 #define RCLK_DOUT  BIT4
 #define SRCLK_DOUT BIT5
 #define OE_DOUT    BIT6
+#define DOUT_OUT   SER_DOUT+RCLK_DOUT+SRCLK_DOUT+OE_DOUT
 #define SENDMODE_DATA 3
 
 #define true    1
@@ -122,9 +127,11 @@ typedef unsigned char uint8_t;
 
 // help routine
 void cmd_help();
+void cmd_test();
 // serial routines
 void send_str(char *);
 void echo(char);
+void pause_for_char();
 // command processing routines
 void cmd_echo();
 void cmd_read();
@@ -137,7 +144,10 @@ char write_buf[64];
 char eeprom_flags = 0;
 int write_buf_idx = 0;
 int write_buf_target_size = 0;
-char write_mode = false;
+#define SERMODE_WRITE 0
+#define SERMODE_CMD   1
+#define SERMODE_ECHO  2
+char serial_mode = SERMODE_CMD;
 uint16_t cur_write_addr;
 uint16_t end_write_addr;
 
@@ -154,14 +164,28 @@ int main(void)
     DCOCTL = 0;                               // Select lowest DCOx and MODx settings
     BCSCTL1 = CALBC1_16MHZ;                   // Set DCO
     DCOCTL = CALDCO_16MHZ;
+
     P1SEL = BIT1 + BIT2 ;                     // P1.1 = RXD, P1.2=TXD
     P1SEL2 = BIT1 + BIT2 ;                    // P1.1 = RXD, P1.2=TXD
-    UCA0CTL1 |= UCSSEL_2;                     // SMCLK
+    P1DIR = (F_OUT+A_OUT);                    // Port 1 outputs
+
+    P2SEL = 0;                                // Port 2 == GPIO
+    P2SEL2 = 0;                               // Port 2 == GPIO
+    P2DIR = (DIN_OUT+DOUT_OUT);               // Port 2 outputs
+    P2DIR &= ~(DIN_IN);                       // Port 2 inputs
+
+    // Start in safe state
+    P1OUT &= ~(SER_F + RCLK_F + SRCLK_F);
+    P1OUT &= ~(SER_A + RCLK_A + SRCLK_A);
+    P2OUT &= ~(DIN_CLK + DIN_SHLD);
+    P2OUT &= ~(SER_DOUT + RCLK_DOUT + SRCLK_DOUT);
+    P2OUT |= OE_DOUT;
 
     /*
        For table of values see MSP430 user guide,
        table 15-4 on page 424
     */
+    UCA0CTL1 |= UCSSEL_2;                     // SMCLK
     //UCA0BR0 = 104;                            // 1MHz 9600 (104)
     //UCA0BR1 = 0;                              // 1MHz 9600 (0)
     //UCA0MCTL = UCBRS0;                        // 1MHz Modulation UCBRSx = 1
@@ -179,21 +203,13 @@ int main(void)
     // undefined state.
     P2OUT |= OE_DOUT;
 
+    serial_mode = SERMODE_CMD;
     send_str("\r\n");
     while(1) {
         // Send ready prompt
         send_str("ready>");
 
-        // Enable USCI_A0 RX interrupt
-        IE2 |= UCA0RXIE;
-
-        // Go to sleep while RX interrupt routine
-        // builds command
-        __bis_SR_register(LPM0_bits + GIE);
-
-        // Disable the serial interrupts while we
-        // process the command
-        IE2 &= ~UCA0RXIE;
+        pause_for_char();
 
         // Analyze the command and call the
         // appropriate routine
@@ -205,6 +221,8 @@ int main(void)
             cmd_write();
         else if(strncmp(cmd, "help", 4) == 0)
             cmd_help();
+        else if(strncmp(cmd, "test", 4) == 0)
+            cmd_test();
         else
             send_str("Invalid command\r\n");
         strcpy(cmd, "");
@@ -214,12 +232,98 @@ int main(void)
 // Help command
 void cmd_help() {
     send_str("help: this help information\r\n");
+    send_str("test: test sequence (don't use with eeprom in socket\r\n");
     send_str("echo {on,off}: display, enable, disable echo\r\n");
     send_str("read 0xabcd 0xef01: read bytes from start to end addr, inclusive\r\n");
     send_str("write 0xabcd 0xef01 {nopage}: write bytes from start to end addr.\r\n");
     send_str("  If nopage, bytes will be written individually with 10ms pauses\r\n");
     send_str("  between each byte. By default, will RX bytes up to next 64-byte\r\n");
     send_str("  boundary and write up to 64 bytes as a page.\r\n");
+}
+
+// Stops the CPU and waits for a character to
+// arrive on the serial interface.  USCI0RX_ISR
+// is executed when the byte arrives.
+void pause_for_char() {
+    // Enable USCI_A0 RX interrupt
+    IE2 |= UCA0RXIE;
+
+    // Go to sleep while RX interrupt routine
+    // builds command
+    __bis_SR_register(LPM0_bits + GIE);
+
+    // Disable the serial interrupts while we
+    // process the command
+    IE2 &= ~UCA0RXIE;
+}
+
+// Test sequence
+void cmd_test() {
+    // Pause for each keystroke and echo
+    serial_mode = SERMODE_ECHO;
+
+    // Flags
+    send_str("RCLK_F...");
+    pause_for_char();
+    P1OUT ^= RCLK_F; P1OUT ^= RCLK_F;
+    send_str("...OK\r\n");
+
+    send_str("SRCLK_F...");
+    pause_for_char();
+    P1OUT ^= SRCLK_F; P1OUT ^= SRCLK_F;
+    send_str("...OK\r\n");
+
+    send_str("SER_F...");
+    pause_for_char();
+    P1OUT ^= SER_F; P1OUT ^= SER_F;
+    send_str("...OK\r\n");
+
+    // Address
+    send_str("RCLK_A...");
+    pause_for_char();
+    P1OUT ^= RCLK_A; P1OUT ^= RCLK_A;
+    send_str("...OK\r\n");
+
+    send_str("SRCLK_A...");
+    pause_for_char();
+    P1OUT ^= SRCLK_A; P1OUT ^= SRCLK_A;
+    send_str("...OK\r\n");
+
+    send_str("SER_A...");
+    pause_for_char();
+    P1OUT ^= SER_A; P1OUT ^= SER_A;
+    send_str("...OK\r\n");
+
+    // Data out (write to eeprom)
+    send_str("RCLK_DOUT...");
+    pause_for_char();
+    P2OUT ^= RCLK_DOUT; P2OUT ^= RCLK_DOUT;
+    send_str("...OK\r\n");
+
+    send_str("SRCLK_DOUT...");
+    pause_for_char();
+    P2OUT ^= SRCLK_DOUT; P2OUT ^= SRCLK_DOUT;
+    send_str("...OK\r\n");
+
+    send_str("SER_DOUT...");
+    pause_for_char();
+    P2OUT ^= SER_DOUT; P2OUT ^= SER_DOUT;
+    send_str("...OK\r\n");
+
+    send_str("OE_DOUT...");
+    pause_for_char();
+    P2OUT ^= OE_DOUT; P2OUT ^= OE_DOUT;
+    send_str("...OK\r\n");
+
+    // Data in (read from eeprom)
+/*
+// Port 2 - data in
+#define DIN_QH   BIT0
+#define DIN_CLK  BIT1
+#define DIN_SHLD BIT2
+*/
+
+    serial_mode = SERMODE_CMD;
 }
 
 // Echo command: change echo_mode
@@ -330,7 +434,7 @@ void cmd_write() {
         send_str("No Paging\r\n");
 
     // Enable write mode in the serial RX interrupt routine
-    write_mode = true;
+    serial_mode = SERMODE_WRITE;
 
     // Set the EEPROM flags to a known state
     // R_W high (strobe low to write)
@@ -364,16 +468,7 @@ void cmd_write() {
         // at beginning of write_buf
         write_buf_idx = 0;
 
-        // Enable USCI_A0 RX interrupt
-        IE2 |= UCA0RXIE;
-
-        // Go to sleep while RX interrupt routine
-        // collects write_buf_target_size bytes
-        __bis_SR_register(LPM0_bits + GIE);
-
-        // Disable the serial interrupts while we
-        // process the received data
-        IE2 &= ~UCA0RXIE;
+        pause_for_char();
 
         sprintf(buf, "Writing %d bytes starting at 0x%04x\r\n", write_buf_target_size, cur_write_addr);
         send_str(buf);
@@ -397,7 +492,7 @@ void cmd_write() {
     }
 
     // Disable write mode in the serial RX interrupt routine
-    write_mode = false;
+    serial_mode = SERMODE_CMD;
 
     // Disable the data shift register's outputs
     // by pulling its _OE pin high
@@ -407,7 +502,7 @@ void cmd_write() {
 // Serial data RX interrupt
 #pragma vector=USCIAB0RX_VECTOR
 __interrupt void USCI0RX_ISR(void) {
-    if(write_mode) {
+    if(serial_mode == SERMODE_WRITE) {
         write_buf[write_buf_idx] = UCA0RXBUF;
         write_buf_idx++;
         // once we have collected enough bytes, wake the CPU back up
@@ -415,16 +510,21 @@ __interrupt void USCI0RX_ISR(void) {
             __bic_SR_register_on_exit(LPM0_bits);
         }
     }
-    else if(UCA0RXBUF == 0x0d) {
-        if(echo_mode) send_str("\r\n");
-        // when command is complete, wake the CPU back up
+    else if(serial_mode == SERMODE_ECHO) {
+        if(echo_mode) echo(UCA0RXBUF);
         __bic_SR_register_on_exit(LPM0_bits);
     }
-    else {
-        if(echo_mode) echo(UCA0RXBUF);
-        strncat(cmd, &UCA0RXBUF, 1);
+    else if(serial_mode == SERMODE_CMD) {
+        if(UCA0RXBUF == 0x0d) {
+            if(echo_mode) send_str("\r\n");
+            // when command is complete, wake the CPU back up
+            __bic_SR_register_on_exit(LPM0_bits);
+        }
+        else {
+            if(echo_mode) echo(UCA0RXBUF);
+            strncat(cmd, &UCA0RXBUF, 1);
+        }
     }
-
 }
 
 // Echos a char back to the client
