@@ -16,31 +16,47 @@
 //            |                 | 9600 - 8N1
 //            |     P1.2/UCA0TXD|------------> white
 //            |                 |
-//            |             P1.0|--> RCLK_F
-//            |             P1.3|--> SER_F
-//            |             P1.4|--> SRCLK_F
+//            |             P1.6|--> RCLK_F
+//            |             P1.0|--> SER_F
+//            |             P1.7|--> SRCLK_F
 //            |                 |
-//            |             P1.5|--> RCLK_DA
-//            |             P1.6|--> SER_DA
-//            |             P1.7|--> SRCLK_DA
+//            |             P1.6|--> RCLK_A
+//            |             P1.5|--> SER_A
+//            |             P1.7|--> SRCLK_A
+//            |                 |
+//            |             P2.3|--> SER_DOUT
+//            |             P2.4|--> RCLK_DOUT
+//            |             P2.5|--> SRCLK_DOUT
+//            |             P2.6|--> OE_DOUT
+//            |                 |
+//            |             P2.0|<-- DIN_QH
+//            |             P2.1|--> DIN_CLK
+//            |             P2.2|--> DIN_SHLD
 //            |                 |
 //
 // Launchpad silkscreen is mis-labeled, TXD/RXD are backwards.
 //
 //   Output format:
 //
-//    Data/Address shift regs
-//    |2222 1111|1111 11  |         |
-//    |3210 9876|5432 1098|7654 3210|
-//    |data (8b)|   address (16b)   |
+//    Address shift reg
+//    Qhgfe dcba hgfe dcba
+//    |1111 11  |         |
+//    |5432 1098|7654 3210|
+//    |   address (16b)   |
+//
+//    Data out shift reg
+//    Qhgfe dcba
+//    |7654 3210|
+//    |data (8b)|
 //
 //    Flags shift reg
+//    Qhgfe dcba
 //    |7654 3210|
 //    |flag (8b)|
 //         
-//     flag[0] = ~OE
-//     flag[1] = R/~W
-//     flag[2] = ~CE
+//     flag[0]/Qa = ~WE
+//     flag[1]/Qb = ~OE
+//     flag[2]/Qc = ~CE
 //
 //
 //******************************************************************************
@@ -70,18 +86,32 @@
 #include <stdio.h>
 #include <stdlib.h>
 
-#define RCLK_DA  BIT5
-#define SER_DA   BIT6
-#define SRCLK_DA BIT7
-
+// Port 1 - flags
 #define RCLK_F   BIT3
 #define SRCLK_F  BIT4
 #define SER_F    BIT0
-
-#define _OE      BIT0
-#define R_W      BIT1
+#define SENDMODE_FLAG 1
+// Flag bits
+#define R_W      BIT0
+#define _OE      BIT1
 #define _CE      BIT2
-#define data_OE  BIT3
+// Port 1 - address
+#define RCLK_A   BIT6
+#define SER_A    BIT7
+#define SRCLK_A  BIT5
+#define SENDMODE_ADDR 2
+
+// Port 2 - data in
+#define DIN_QH   BIT0
+#define DIN_CLK  BIT1
+#define DIN_SHLD BIT2
+
+// Port 2 - data out
+#define SER_DOUT   BIT3
+#define RCLK_DOUT  BIT4
+#define SRCLK_DOUT BIT5
+#define OE_DOUT    BIT6
+#define SENDMODE_DATA 3
 
 #define true    1
 #define false   0
@@ -90,6 +120,8 @@
 typedef unsigned int uint16_t;
 typedef unsigned char uint8_t;
 
+// help routine
+void cmd_help();
 // serial routines
 void send_str(char *);
 void echo(char);
@@ -102,6 +134,7 @@ void cmd_write();
 char echo_mode = true;
 char cmd[32];
 char write_buf[64];
+char eeprom_flags = 0;
 int write_buf_idx = 0;
 int write_buf_target_size = 0;
 char write_mode = false;
@@ -111,7 +144,8 @@ uint16_t end_write_addr;
 // shift register routines
 void shiftreg_send(uint8_t *, uint8_t);
 void send_flags(uint8_t);
-void send_data(uint16_t, uint8_t);
+void send_data(uint8_t);
+void send_addr(uint16_t);
 
 int main(void)
 {
@@ -139,6 +173,11 @@ int main(void)
     UCA0MCTL = UCBRS2 + UCBRS1;               // 16MHz Modulation UCBRSx = 6
 
     UCA0CTL1 &= ~UCSWRST;                     // **Initialize USCI state machine**
+
+    // Set ~OE on the data-out shift register,
+    // as the ~OE line on the EEPROM is in an
+    // undefined state.
+    P2OUT |= OE_DOUT;
 
     send_str("\r\n");
     while(1) {
@@ -293,6 +332,16 @@ void cmd_write() {
     // Enable write mode in the serial RX interrupt routine
     write_mode = true;
 
+    // Set the EEPROM flags to a known state
+    // R_W high (strobe low to write)
+    // _OE low  (data pins are inputs)
+    // _CE low  (chip enabled)
+    eeprom_flags = R_W;
+    send_flags(eeprom_flags);
+    // Enable the data shift register's outputs
+    // by pulling its _OE pin low
+    P2OUT &= ~OE_DOUT;
+
     while(cur_write_addr <= end_write_addr) {
         // Figure out how many bytes we want this round
         if(!write_page_mode) {
@@ -331,6 +380,16 @@ void cmd_write() {
         for(int i=0; i<write_buf_idx; i++) {
             sprintf(buf, "%04x = %02x\r\n", cur_write_addr, write_buf[i]);
             send_str(buf);
+
+            // Set address and data
+            send_addr(cur_write_addr);
+            send_data(write_buf[i]);
+            // Strobe R_W pin
+            eeprom_flags &= ~R_W;
+            send_flags(eeprom_flags);
+            eeprom_flags |= R_W;
+            send_flags(eeprom_flags);
+
             cur_write_addr++;
         }
         send_str("Pausing 10ms\r\n");
@@ -339,6 +398,10 @@ void cmd_write() {
 
     // Disable write mode in the serial RX interrupt routine
     write_mode = false;
+
+    // Disable the data shift register's outputs
+    // by pulling its _OE pin high
+    P2OUT |= OE_DOUT;
 }
 
 // Serial data RX interrupt
@@ -384,38 +447,54 @@ void send_str(char *str) {
 
 // Send a one-byte set of flags to the flags shift register
 void send_flags(uint8_t flags) {
-    shiftreg_send(&flags, 1);
+    shiftreg_send(&flags, SENDMODE_FLAG);
     return;
 }
 
-// Send three bytes (2-byte addr + 1 byte data) to the
-// address+data shift register
-void send_data(uint16_t send_addr, uint8_t send_data) {
-    uint8_t to_send[3];
-    to_send[0] = (send_addr & 0x00ff);
-    to_send[1] = ((send_addr & 0xff00) >> 8);
-    to_send[2] = send_data;
-    shiftreg_send(to_send, 3);
+// Send two bytes to the address shift register
+void send_addr(uint16_t addr) {
+    uint8_t to_send[2];
+    to_send[0] = (addr & 0x00ff);
+    to_send[1] = ((addr & 0xff00) >> 8);
+    shiftreg_send(to_send, SENDMODE_ADDR);
+    return;
+}
+
+// Send one byte to the data-out shift register
+void send_data(uint8_t data) {
+    shiftreg_send(&data, SENDMODE_DATA);
     return;
 }
 
 // Generic shift register interface
-void shiftreg_send(uint8_t *data_arr, uint8_t count) {
+void shiftreg_send(uint8_t *data_arr, uint8_t sendmode) {
     uint8_t SER;
     uint8_t SRCLK;
     uint8_t RCLK;
-    // If just one byte, the data must be
-    // flags, so use the _F ports, otherwise
-    // use the _DA ports
-    if(count == 1) {
-        SER = SER_F;
-        SRCLK = SRCLK_F;
-        RCLK = RCLK_F;
-    }
-    else {
-        SER = SER_DA;
-        SRCLK = SRCLK_DA;
-        RCLK = RCLK_DA;
+    uint16_t PORT;
+    uint8_t count = 1;
+    uint8_t max_bit = 7;
+    switch(sendmode) {
+        case SENDMODE_FLAG:
+            SER = SER_F;
+            SRCLK = SRCLK_F;
+            RCLK = RCLK_F;
+            PORT = P1OUT;
+            max_bit = 2;
+            break;
+        case SENDMODE_DATA:
+            SER = SER_DOUT;
+            SRCLK = SRCLK_DOUT;
+            RCLK = RCLK_DOUT;
+            PORT = P2OUT;
+            break;
+        case SENDMODE_ADDR:
+            SER = SER_A;
+            SRCLK = SRCLK_A;
+            RCLK = RCLK_A;
+            PORT = P1OUT;
+            count = 2;
+            break;
     }
 
     uint8_t mask;
@@ -423,17 +502,17 @@ void shiftreg_send(uint8_t *data_arr, uint8_t count) {
     for(uint8_t idx=0; idx<count; idx++) {
         mask = 0x01;
         uint8_t this_byte = data_arr[idx];
-        for(uint8_t bit = 0; bit <= 7; bit++) {
+        for(uint8_t bit = 0; bit <= max_bit; bit++) {
             // Put this bit on the serial input
             if(this_byte & mask)
-                P1OUT |= SER;
+                PORT |= SER;
             else
-                P1OUT &= ~SER;
+                PORT &= ~SER;
 
             // Strobe the SRCLK to shift
             // this bit into the shift register
-            P1OUT |= SRCLK;
-            P1OUT &= ~SRCLK;
+            PORT |= SRCLK;
+            PORT &= ~SRCLK;
 
             // Shift our mask to the next bit
             mask = mask << 1;
@@ -441,12 +520,12 @@ void shiftreg_send(uint8_t *data_arr, uint8_t count) {
     }
 
     // reset SER
-    P1OUT &= ~SER;
+    PORT &= ~SER;
 
     // Strobe the RCLK to load the shifted
     // data into the output register
-    P1OUT |= RCLK;
-    P1OUT &= ~RCLK;
+    PORT |= RCLK;
+    PORT &= ~RCLK;
 
     return;
 }
