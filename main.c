@@ -74,9 +74,9 @@
 #define SER_DA   BIT6
 #define SRCLK_DA BIT7
 
-#define RCLK_F   BIT0
-#define SRCLK_F  BIT3
-#define SER_F    BIT4
+#define RCLK_F   BIT3
+#define SRCLK_F  BIT4
+#define SER_F    BIT0
 
 #define _OE      BIT0
 #define R_W      BIT1
