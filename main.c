@@ -474,7 +474,7 @@ void cmd_write() {
         send_str(buf);
         // XXX Remove this when complete
         for(int i=0; i<write_buf_idx; i++) {
-            sprintf(buf, "%04x = %02x\r\n", cur_write_addr, write_buf[i]);
+            sprintf(buf, "%04x = %02x\r\n", cur_write_addr + i, write_buf[i]);
             send_str(buf);
         }
         // XXX end
