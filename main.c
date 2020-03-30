@@ -120,6 +120,7 @@
 
 #define true    1
 #define false   0
+#define noop
 
 // Make 16-bit and 8-bit unsigned ints explicit
 typedef unsigned int uint16_t;
@@ -127,7 +128,6 @@ typedef unsigned char uint8_t;
 
 // help routine
 void cmd_help();
-void cmd_test();
 // serial routines
 void send_str(char *);
 void echo(char);
@@ -136,9 +136,13 @@ void pause_for_char();
 void cmd_echo();
 void cmd_read();
 void cmd_write();
+void cmd_page_write();
+void cmd_eeprom_lock();
 
 // global vars
 char echo_mode = true;
+char page_write = true;
+char eeprom_lock = true;
 char cmd[32];
 char write_buf[64];
 char eeprom_flags = 0;
@@ -150,6 +154,23 @@ int write_buf_target_size = 0;
 char serial_mode = SERMODE_CMD;
 uint16_t cur_write_addr;
 uint16_t end_write_addr;
+
+// software data protection sequences
+uint16_t enable_data_protect[4][2] = {
+    { 0x5555, 0x00aa },
+    { 0x2aaa, 0x0055 },
+    { 0x5555, 0x00a0 },
+    { 0x0000, 0x0000 },
+};
+uint16_t disable_data_protect[7][2] = {
+    { 0x5555, 0x00aa },
+    { 0x2aaa, 0x0055 },
+    { 0x5555, 0x0080 },
+    { 0x5555, 0x00aa },
+    { 0x2aaa, 0x0055 },
+    { 0x5555, 0x0020 },
+    { 0x0000, 0x0000 },
+};
 
 // shift register routines
 void shiftreg_send(uint8_t *, uint8_t);
@@ -213,16 +234,22 @@ int main(void)
 
         // Analyze the command and call the
         // appropriate routine
-        if(strncmp(cmd, "echo", 4) == 0)
+        if(strlen(cmd) == 0)
+            // do nothing; just loop back 
+            // to a command prompt
+            noop;
+        else if(strncmp(cmd, "echo", 4) == 0)
             cmd_echo();
         else if(strncmp(cmd, "read", 4) == 0)
             cmd_read();
         else if(strncmp(cmd, "write", 5) == 0)
             cmd_write();
+        else if(strncmp(cmd, "page_write", 10) == 0)
+            cmd_page_write();
+        else if(strncmp(cmd, "eeprom_lock", 11) == 0)
+            cmd_eeprom_lock();
         else if(strncmp(cmd, "help", 4) == 0)
             cmd_help();
-        else if(strncmp(cmd, "test", 4) == 0)
-            cmd_test();
         else
             send_str("Invalid command\r\n");
         strcpy(cmd, "");
@@ -232,13 +259,16 @@ int main(void)
 // Help command
 void cmd_help() {
     send_str("help: this help information\r\n");
-    send_str("test: test sequence (don't use with eeprom in socket\r\n");
     send_str("echo {on,off}: display, enable, disable echo\r\n");
+    send_str("page_write {on,off}: display, enable, disable page write mode\r\n");
+    send_str("eeprom_lock {on,off}: display, enable, disable EEPROM lock mode\r\n");
     send_str("read 0xabcd 0xef01: read bytes from start to end addr, inclusive\r\n");
-    send_str("write 0xabcd 0xef01 {nopage}: write bytes from start to end addr.\r\n");
-    send_str("  If nopage, bytes will be written individually with 10ms pauses\r\n");
-    send_str("  between each byte. By default, will RX bytes up to next 64-byte\r\n");
-    send_str("  boundary and write up to 64 bytes as a page.\r\n");
+    send_str("write 0xabcd 0xef01: write bytes from start to end addr.\r\n");
+    send_str("- If page_write enabled, 64 byte pages will be written with\r\n");
+    send_str("  10ms pauses between each page.  Otherwise, each byte will\r\r");
+    send_str("  be written individually with 10ms pauses in between.\r\n");
+    send_str("- If eeprom_lock enabled, the Atmel software write protection\r\n");
+    send_str("  routine will be executed before and after writing\r\n");
 }
 
 // Stops the CPU and waits for a character to
@@ -257,75 +287,6 @@ void pause_for_char() {
     IE2 &= ~UCA0RXIE;
 }
 
-// Test sequence
-void cmd_test() {
-    // Pause for each keystroke and echo
-    serial_mode = SERMODE_ECHO;
-
-    // Flags
-    send_str("RCLK_F...");
-    pause_for_char();
-    P1OUT ^= RCLK_F; P1OUT ^= RCLK_F;
-    send_str("...OK\r\n");
-
-    send_str("SRCLK_F...");
-    pause_for_char();
-    P1OUT ^= SRCLK_F; P1OUT ^= SRCLK_F;
-    send_str("...OK\r\n");
-
-    send_str("SER_F...");
-    pause_for_char();
-    P1OUT ^= SER_F; P1OUT ^= SER_F;
-    send_str("...OK\r\n");
-
-    // Address
-    send_str("RCLK_A...");
-    pause_for_char();
-    P1OUT ^= RCLK_A; P1OUT ^= RCLK_A;
-    send_str("...OK\r\n");
-
-    send_str("SRCLK_A...");
-    pause_for_char();
-    P1OUT ^= SRCLK_A; P1OUT ^= SRCLK_A;
-    send_str("...OK\r\n");
-
-    send_str("SER_A...");
-    pause_for_char();
-    P1OUT ^= SER_A; P1OUT ^= SER_A;
-    send_str("...OK\r\n");
-
-    // Data out (write to eeprom)
-    send_str("RCLK_DOUT...");
-    pause_for_char();
-    P2OUT ^= RCLK_DOUT; P2OUT ^= RCLK_DOUT;
-    send_str("...OK\r\n");
-
-    send_str("SRCLK_DOUT...");
-    pause_for_char();
-    P2OUT ^= SRCLK_DOUT; P2OUT ^= SRCLK_DOUT;
-    send_str("...OK\r\n");
-
-    send_str("SER_DOUT...");
-    pause_for_char();
-    P2OUT ^= SER_DOUT; P2OUT ^= SER_DOUT;
-    send_str("...OK\r\n");
-
-    send_str("OE_DOUT...");
-    pause_for_char();
-    P2OUT ^= OE_DOUT; P2OUT ^= OE_DOUT;
-    send_str("...OK\r\n");
-
-    // Data in (read from eeprom)
-/*
-// Port 2 - data in
-#define DIN_QH   BIT0
-#define DIN_CLK  BIT1
-#define DIN_SHLD BIT2
-*/
-
-    serial_mode = SERMODE_CMD;
-}
-
 // Echo command: change echo_mode
 void cmd_echo() {
     char buf[64];
@@ -337,18 +298,56 @@ void cmd_echo() {
     }
     else {
         if(echo_mode)
-            sprintf(buf, "Current echo mode: %d (true)\r\n", echo_mode);
+            sprintf(buf, "Current echo setting: %d (enabled)\r\n", echo_mode);
         else
-            sprintf(buf, "Current echo mode: %d (false)\r\n", echo_mode);
+            sprintf(buf, "Current echo setting: %d (disabled)\r\n", echo_mode);
+        send_str(buf);
+    }
+}
+
+// page_write command: change page_write mode
+void cmd_page_write() {
+    char buf[64];
+    if(strcmp(cmd, "page_write on") == 0) {
+        page_write = true;
+    }
+    else if(strcmp(cmd, "page_write off") == 0) {
+        page_write = false;
+    }
+    else {
+        if(page_write)
+            sprintf(buf, "Current page_write setting: %d (enabled)\r\n", page_write);
+        else
+            sprintf(buf, "Current page_write setting: %d (disabled)\r\n", page_write);
+        send_str(buf);
+    }
+}
+
+// eeprom_lock command: change eeprom_lock mode
+void cmd_eeprom_lock() {
+    char buf[64];
+    if(strcmp(cmd, "eeprom_lock on") == 0) {
+        eeprom_lock = true;
+    }
+    else if(strcmp(cmd, "eeprom_lock off") == 0) {
+        eeprom_lock = false;
+    }
+    else {
+        if(eeprom_lock)
+            sprintf(buf, "Current eeprom_lock setting: %d (enabled)\r\n", eeprom_lock);
+        else
+            sprintf(buf, "Current eeprom_lock setting: %d (disabled)\r\n", eeprom_lock);
         send_str(buf);
     }
 }
 
 // Read command: read from EEPROM
 void cmd_read() {
-    char buf[64];
     uint16_t start_addr;
     uint16_t end_addr;
+    uint8_t read_byte;
+    uint8_t mask;
+    char buf[64];
 
     if(strlen(cmd) != 18) {
         sprintf(buf, "Invalid read command: wrong length: %d, expecting 18\r\n", strlen(cmd));
@@ -371,32 +370,78 @@ void cmd_read() {
         send_str("Invalid read command: start-addr > end-addr\r\n");
         return;
     }
-    sprintf(buf, "Start addr: %04x (%d)\r\n", start_addr, start_addr);
+    sprintf(buf, "Start addr: %04x (%u)\r\n", start_addr, start_addr);
     send_str(buf);
-    sprintf(buf, "End addr: %04x (%d)\r\n", end_addr, end_addr);
+    sprintf(buf, "End addr: %04x (%u)\r\n", end_addr, end_addr);
     send_str(buf);
-    sprintf(buf, "Sending %d bytes now...\r\n", end_addr - start_addr + 1);
+    sprintf(buf, "Requesting %u bytes now...\r\n", end_addr - start_addr + 1);
     send_str(buf);
-    for(int i=start_addr; i<=end_addr; i++) {
-        sprintf(buf, "0x%04x %02x\r\n", i, i);
-        send_str(buf);
+
+    // Disable the data write shift register's outputs
+    // by pulling its _OE pin high
+    P2OUT |= OE_DOUT;
+    // Set the EEPROM flags to a known state
+    // R_W high (strobe low to write)
+    // _OE low  (data pins are outputs)
+    // _CE low  (chip enabled)
+    eeprom_flags = R_W;
+    send_flags(eeprom_flags);
+
+    // Set the shift register's pins to known states
+    P2OUT &= ~DIN_CLK;
+    P2OUT |= DIN_SHLD;
+
+    // Iterate through each address
+    for(uint16_t i=start_addr; i<=end_addr; i++) {
+        // Set the address
+        send_addr(i);
+        // Strobe the SH/~LD pin and strobe the clock to load the byte
+        P2OUT &= ~DIN_SHLD;
+        P2OUT |= DIN_CLK;
+        P2OUT &= ~DIN_CLK;
+        P2OUT |= DIN_SHLD;
+
+        // the LSB of the EEPROM data is now on QH
+        read_byte = 0x00;
+        mask = 0x01;
+        while(1) {
+            if(P2IN & DIN_QH)
+                read_byte |= mask;
+            if(mask >= 0x80)
+                break;
+            mask = (mask << 1);
+            // Shift bits on rising clock edge
+            P2OUT |= DIN_CLK;
+            P2OUT &= ~DIN_CLK;
+        }
+
+        if(echo_mode) {
+            sprintf(buf, "0x%04x %02x\r\n", i, read_byte);
+            send_str(buf);
+        }
     }
+
+    // Set the EEPROM flags to a known state
+    // R_W high (strobe low to write)
+    // _OE high (data pins are inputs)
+    // _CE low  (chip enabled)
+    eeprom_flags = R_W + _OE;
+    send_flags(eeprom_flags);
 }
 
 // Write command: write to EEPROM
 void cmd_write() {
     char buf[128];
-    char write_page_mode;
     int len;
 
     len = strlen(cmd);
-    if(len != 19 && len != 24 && len != 26) {
-        sprintf(buf, "Invalid write command: wrong length: %d, expecting 19, 24, or 26\r\n", len);
+    if(len != 19) {
+        sprintf(buf, "Invalid write command: wrong length: %d, expecting 19\r\n", len);
         send_str(buf);
         return;
     }
-    // write 0xabcd 0xef01 nopage
-    // 0       ^8     ^15  ^20
+    // write 0xabcd 0xef01
+    // 0       ^8     ^15 
     cur_write_addr = strtoul(&cmd[8], 0, 16);
     end_write_addr = strtoul(&cmd[15], 0, 16);
     if(cur_write_addr == 0 && strncmp(&cmd[8], "0000", 4) != 0) {
@@ -411,30 +456,21 @@ void cmd_write() {
         send_str("Invalid write command: start-addr > end-addr\r\n");
         return;
     }
-    if(len == 19 || strcmp(&cmd[20], "page") == 0) {
-        write_page_mode = true;
-    }
-    else if(strcmp(&cmd[20], "nopage") == 0) {
-        write_page_mode = false;
-    }
-    else {
-        send_str("Invalid write command: page/nopage not parsed\r\n");
-        return;
-    }
 
-    sprintf(buf, "Start addr: %04x (%d)\r\n", cur_write_addr, cur_write_addr);
+    sprintf(buf, "Start addr: %04x (%u)\r\n", cur_write_addr, cur_write_addr);
     send_str(buf);
-    sprintf(buf, "End addr: %04x (%d)\r\n", end_write_addr, end_write_addr);
+    sprintf(buf, "End addr: %04x (%u)\r\n", end_write_addr, end_write_addr);
     send_str(buf);
-    sprintf(buf, "Total bytes to write: %d\r\n", end_write_addr - cur_write_addr + 1);
+    sprintf(buf, "Total bytes to write: %u\r\n", end_write_addr - cur_write_addr + 1);
     send_str(buf);
-    if(write_page_mode)
+    if(page_write)
         send_str("Paging\r\n");
     else
         send_str("No Paging\r\n");
-
-    // Enable write mode in the serial RX interrupt routine
-    serial_mode = SERMODE_WRITE;
+    if(eeprom_lock)
+        send_str("EEPROM Lock Enabled\r\n");
+    else
+        send_str("EEPROM Lock Disabled\n");
 
     // Set the EEPROM flags to a known state
     // R_W high (strobe low to write)
@@ -446,9 +482,26 @@ void cmd_write() {
     // by pulling its _OE pin low
     P2OUT &= ~OE_DOUT;
 
+    if(eeprom_lock) {
+        // disable software data protection
+        for(uint16_t i=0; disable_data_protect[i][0] > 0; i++) {
+            // Set address and data
+            send_addr(disable_data_protect[i][0]);
+            send_data((char)(disable_data_protect[i][1] & 0xff));
+            // Strobe R_W pin
+            eeprom_flags &= ~R_W;
+            send_flags(eeprom_flags);
+            eeprom_flags |= R_W;
+            send_flags(eeprom_flags);
+        }
+    }
+
+    // Enable write mode in the serial RX interrupt routine
+    serial_mode = SERMODE_WRITE;
+
     while(cur_write_addr <= end_write_addr) {
         // Figure out how many bytes we want this round
-        if(!write_page_mode) {
+        if(!page_write) {
             write_buf_target_size = 1;
         }
         else {
@@ -461,7 +514,7 @@ void cmd_write() {
         }
         
         // Prompt the client to send that much data
-        sprintf(buf, "Send %d bytes, %d remaining...\r\n", write_buf_target_size, end_write_addr - cur_write_addr + 1);
+        sprintf(buf, "Send %d bytes, %u remaining...\r\n", write_buf_target_size, end_write_addr - cur_write_addr + 1);
         send_str(buf);
 
         // Reset write_buf_idx so new data arrives
@@ -472,12 +525,6 @@ void cmd_write() {
 
         sprintf(buf, "Writing %d bytes starting at 0x%04x\r\n", write_buf_target_size, cur_write_addr);
         send_str(buf);
-        // XXX Remove this when complete
-        for(int i=0; i<write_buf_idx; i++) {
-            sprintf(buf, "%04x = %02x\r\n", cur_write_addr + i, write_buf[i]);
-            send_str(buf);
-        }
-        // XXX end
         for(int i=0; i<write_buf_idx; i++) {
             // Set address and data
             send_addr(cur_write_addr);
@@ -490,12 +537,25 @@ void cmd_write() {
 
             cur_write_addr++;
         }
-        send_str("Pausing 10ms\r\n"); // XXX remove this when complete
         __delay_cycles(200000); // 200k cycles @ 16MHz => 12.5ms
     }
 
     // Disable write mode in the serial RX interrupt routine
     serial_mode = SERMODE_CMD;
+
+    if(eeprom_lock) {
+        // enable software dsata protection
+        for(uint16_t i=0; enable_data_protect[i][0] > 0; i++) {
+            // Set address and data
+            send_addr(enable_data_protect[i][0]);
+            send_data((char)(enable_data_protect[i][1] & 0xff));
+            // Strobe R_W pin
+            eeprom_flags &= ~R_W;
+            send_flags(eeprom_flags);
+            eeprom_flags |= R_W;
+            send_flags(eeprom_flags);
+        }
+    }
 
     // Disable the data shift register's outputs
     // by pulling its _OE pin high
@@ -578,9 +638,9 @@ void send_data(uint8_t data) {
 
 // Generic shift register interface
 void shiftreg_send(uint8_t *data_arr, uint8_t sendmode) {
-    uint8_t SER;
-    uint8_t SRCLK;
-    uint8_t RCLK;
+    uint8_t SER = 0;
+    uint8_t SRCLK = 0;
+    uint8_t RCLK = 0;
     uint8_t count = 1;
     uint8_t max_bit = 7;
     uint8_t port = 1;
@@ -637,7 +697,7 @@ void shiftreg_send(uint8_t *data_arr, uint8_t sendmode) {
             }
 
             // Shift our mask to the next bit
-            mask = mask << 1;
+            mask = (mask << 1);
         }
     }
 
