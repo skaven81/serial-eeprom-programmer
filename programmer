@@ -1,0 +1,155 @@
+#!/usr/bin/env python3
+# vim: ts=4 sts=4 sw=4 expandtab
+
+import serial
+import time
+
+class EEPROMprogrammer:
+    def __init__(self, port='/dev/ttyUSB0', quiet=False, verbose=False):
+        self.ser = serial.Serial(port=port,
+                                 baudrate=9600,
+                                 parity=serial.PARITY_NONE,
+                                 bytesize=8,
+                                 stopbits=serial.STOPBITS_ONE,
+                                 timeout=5)
+        # Initialize by sending a newline, so we get a ready> prompt.
+        self.quiet = quiet
+        self.verbose = verbose
+        if not self.quiet:
+            print('Initializing programmer on port {}'.format(port))
+        self.ser.reset_output_buffer()
+        self.ser.reset_input_buffer()
+        self.ser.write(b'\r')
+        self.ser.flush()
+        out = self.ser.read_until(b'ready>')
+        if out.endswith(b'ready>'):
+            # Ensure echo is enabled
+            self.ser.write(b'echo on\r')
+            self.ser.flush()
+            out = self.ser.read_until(b'ready>')
+            if out.endswith(b'ready>'):
+                if not self.quiet:
+                    print("Initialized; echo enabled")
+            else:
+                raise RuntimeError("Did not receive ready> prompt after enabling echo, got [{}]".format(out))
+        else:
+            raise RuntimeError("Did not receive ready> prompt, got [{}]".format(out))
+
+    def read(self, start_addr, length):
+        if start_addr > 0x7fff:
+            raise TypeError("start_addr must be <= 0x7fff")
+        end_addr = start_addr + length - 1
+        if end_addr > 0x7fff:
+            raise TypeError("end_addr must be <= 0x7fff")
+
+        # ready>read 0xa000 0xa003
+        # Start addr: a000 (40960)
+        # End addr: a003 (40963)
+        # Requesting 4 bytes now...
+        # 0xa000 62
+        # 0xa001 63
+        # 0xa002 32
+        # 0xa003 33
+        # ready>
+        read_cmd = "read 0x{:04x} 0x{:04x}\r".format(start_addr, end_addr).encode('UTF-8')
+        if self.verbose:
+            print("Sending read command: [{}]".format(read_cmd))
+        self.ser.write(read_cmd)
+        self.ser.flush()
+        self.ser.read_until(b'bytes now...\r\n')
+        cur_addr = start_addr
+        read_bytes = [ ]
+        while(cur_addr <= end_addr):
+            addr, byte = self.ser.readline().rstrip(b'\r\n').decode().split(' ')
+            if not addr.startswith("0x{:04x}".format(cur_addr)):
+                raise RuntimeError("Expecting address {:04x}, got {}".format(cur_addr, out))
+            if self.verbose:
+                print("{}: {}".format(addr, byte))
+            cur_addr += 1
+            read_bytes.append(int(byte, 16))
+
+        return read_bytes
+
+    def write(self, start_addr, data, page_mode=True, data_protect=True):
+        if start_addr > 0x7fff:
+            raise TypeError("start_addr must be <= 0x7fff")
+        end_addr = start_addr + len(data) - 1
+        if end_addr > 0x7fff:
+            raise TypeError("end_addr must be <= 0x7fff")
+
+        # Set page and data protect mode
+        self.ser.write('page_write {}\r'.format('on' if page_mode else 'off').encode('UTF-8'))
+        self.ser.read_until(b'ready>')
+        self.ser.write('eeprom_lock {}\r'.format('on' if data_protect else 'off').encode('UTF-8'))
+        self.ser.read_until(b'ready>')
+
+        # --- with paging enabled ---
+        # ready>write 0x203e 0x2041
+        # Start addr: 203e (8254)
+        # End addr: 2041 (8257)
+        # Total bytes to write: 4
+        # Paging
+        # EEPROM Lock Enabled
+        # Send 2 bytes, 4 remaining...
+        # Writing 2 bytes starting at 0x203e
+        # Send 2 bytes, 2 remaining...
+        # Writing 2 bytes starting at 0x2040
+        # ready>
+        #
+        # --- with paging disabled ---
+        # ready>write 0x203e 0x2041
+        # Start addr: 203e (8254)
+        # End addr: 2041 (8257)
+        # Total bytes to write: 4
+        # No Paging
+        # EEPROM Lock Enabled
+        # Send 1 bytes, 4 remaining...
+        # Writing 1 bytes starting at 0x203e
+        # Send 1 bytes, 3 remaining...
+        # Writing 1 bytes starting at 0x203f
+        # Send 1 bytes, 2 remaining...
+        # Writing 1 bytes starting at 0x2040
+        # Send 1 bytes, 1 remaining...
+        # Writing 1 bytes starting at 0x2041
+        # ready>
+
+        write_cmd = "write 0x{:04x} 0x{:04x}\r".format(start_addr, end_addr).encode('UTF-8')
+        if self.verbose:
+            print("Sending write command: [{}]".format(write_cmd))
+        self.ser.write(write_cmd)
+        self.ser.flush()
+
+        byte_idx = 0
+        while True:
+            # Wait for "Send N bytes prompt"
+            self.ser.read_until(b'Send ')
+            page_size = int(self.ser.read_until(b'bytes, ').split(b' ')[0])
+            remaining = int(self.ser.read_until(b' remaining...\r\n').split(b' ')[0])
+            if not self.quiet:
+                print("Sending {} bytes, {} remaining...".format(page_size, remaining))
+
+            # Send next page_size bytes
+            for i in range(page_size):
+                if self.verbose:
+                    print("0x{:04x}: {:02x}".format(start_addr + byte_idx, data[byte_idx]))
+                self.ser.write(chr(data[byte_idx]).encode('UTF-8'))
+                byte_idx += 1
+            self.ser.flush()
+
+            # Wait for "Writing..." prompt
+            out1 = self.ser.read_until(b'Writing ')
+            out2 = self.ser.read_until(b'\r\n').rstrip(b'\r\n')
+            if self.verbose:
+                print(out1.decode(), out2.decode())
+            if byte_idx >= len(data):
+                break
+        self.ser.read_until(b'ready>')
+
+
+if __name__== "__main__":
+    programmer = EEPROMprogrammer(verbose=True)
+    print("Writing bytes")
+    programmer.write(0x2030, b'abcdefghijklmnopqrstuvwxyz')
+    print("Reading bytes")
+    for byte in programmer.read(0x2030, 26):
+        print("{:02x} {}".format(byte, chr(byte)))
