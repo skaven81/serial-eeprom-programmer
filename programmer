@@ -53,11 +53,20 @@ class EEPROMprogrammer:
         read_cmd = "read 0x{:04x} 0x{:04x}\r".format(start_addr, end_addr).encode('UTF-8')
         if self.verbose:
             print("Sending read command: [{}]".format(read_cmd), file=sys.stderr)
+        if not args.quiet and not args.verbose:
+            progress_bar = Bar('Reading', max=length)
         self.ser.write(read_cmd)
         self.ser.flush()
         self.ser.read_until(b'bytes now...\r\n')
         for cur_addr in range(start_addr, end_addr + 1):
-            yield int(self.ser.read(2), 16)
+            byte = int(self.ser.read(2), 16)
+            if args.verbose:
+                print("0x{:04x} {:02x} {}".format(args.address + wrote_bytes, byte, chr(byte) if 32 < byte < 127 else " "), file=sys.stderr)
+            if not args.quiet and not args.verbose:
+                progress_bar.next()
+            yield byte
+        if not args.quiet and not args.verbose:
+            progress_bar.finish()
 
     def write(self, start_addr, data, page_mode=True, data_protect=True):
         if start_addr > 0x7fff:
@@ -108,19 +117,22 @@ class EEPROMprogrammer:
         self.ser.write(write_cmd)
         self.ser.flush()
 
+        if not args.quiet and not args.verbose:
+            progress_bar = Bar('Writing', max=len(data))
         byte_idx = 0
         while True:
             # Wait for "S N/M"
             self.ser.read_until(b'S ')
             page_size = int(self.ser.read_until(b'/').decode().rstrip('/'))
             remaining = int(self.ser.read_until(b'\r\n').decode().rstrip('\r\n'))
-            if not self.quiet:
-                print("Sending {} bytes, {} remaining...".format(page_size, remaining), file=sys.stderr)
 
             # Send next page_size bytes
             for i in range(page_size):
                 if self.verbose:
                     print("0x{:04x}: {:02x}".format(start_addr + byte_idx, data[byte_idx]), file=sys.stderr)
+                if not self.quiet and not args.verbose:
+                    progress_bar.next()
+
                 self.ser.write(bytes([data[byte_idx]]))
                 byte_idx += 1
             self.ser.flush()
@@ -129,6 +141,8 @@ class EEPROMprogrammer:
             out1 = self.ser.read_until(b'W\r\n')
             if byte_idx >= len(data):
                 break
+        if not args.quiet and not args.verbose:
+            progress_bar.finish()
         self.ser.read_until(b'ready>')
 
 if __name__== "__main__":
@@ -155,17 +169,9 @@ if __name__== "__main__":
             read_length = 0x7fff - args.address
         else:
             read_length = args.length
-        if not args.quiet and not args.verbose:
-            progress_bar = Bar('Reading', max=read_length)
         with open(args.filename, 'wb') as fh:
             for byte in programmer.read(args.address, read_length):
-                if args.verbose:
-                    print("0x{:04x} {:02x} {}".format(args.address + wrote_bytes, byte, chr(byte) if 32 < byte < 127 else " "), file=sys.stderr)
-                if not args.quiet and not args.verbose:
-                    progress_bar.next()
                 wrote_bytes += fh.write(byte.to_bytes(1, 'little'))
-        if not args.quiet and not args.verbose:
-            progress_bar.finish()
         sys.exit(0)
 
     if args.command == 'write' or args.command == 'verify':
