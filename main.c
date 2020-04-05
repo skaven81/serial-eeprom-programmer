@@ -514,7 +514,7 @@ void cmd_write() {
         }
         
         // Prompt the client to send that much data
-        sprintf(buf, "Send %d bytes, %u remaining...\r\n", write_buf_target_size, end_write_addr - cur_write_addr + 1);
+        sprintf(buf, "S %d/%u\r\n", write_buf_target_size, end_write_addr - cur_write_addr + 1);
         send_str(buf);
 
         // Reset write_buf_idx so new data arrives
@@ -523,8 +523,7 @@ void cmd_write() {
 
         pause_for_char();
 
-        sprintf(buf, "Writing %d bytes starting at 0x%04x\r\n", write_buf_target_size, cur_write_addr);
-        send_str(buf);
+        send_str("W\r\n");
         for(int i=0; i<write_buf_idx; i++) {
             // Set address and data
             send_addr(cur_write_addr);
@@ -537,8 +536,15 @@ void cmd_write() {
 
             cur_write_addr++;
         }
+        /* The serial interaction ("Send XX/YY") and the reading
+           of data from the serial port takes far longer than 10ms,
+           so this delay is unnecessary
         __delay_cycles(200000); // 200k cycles @ 16MHz => 12.5ms
+        */
     }
+
+    // ensure we wait at least 10ms after the last write cycle
+    __delay_cycles(200000); // 200k cycles @ 16MHz => 12.5ms
 
     // Disable write mode in the serial RX interrupt routine
     serial_mode = SERMODE_CMD;
@@ -556,6 +562,9 @@ void cmd_write() {
             send_flags(eeprom_flags);
         }
     }
+
+    // ensure we wait at least 10ms after the last write cycle
+    __delay_cycles(200000); // 200k cycles @ 16MHz => 12.5ms
 
     // Disable the data shift register's outputs
     // by pulling its _OE pin high
