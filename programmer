@@ -121,7 +121,7 @@ class EEPROMprogrammer:
             for i in range(page_size):
                 if self.verbose:
                     print("0x{:04x}: {:02x}".format(start_addr + byte_idx, data[byte_idx]), file=sys.stderr)
-                self.ser.write(chr(data[byte_idx]).encode('UTF-8'))
+                self.ser.write(bytes([data[byte_idx]]))
                 byte_idx += 1
             self.ser.flush()
 
