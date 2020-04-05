@@ -416,7 +416,7 @@ void cmd_read() {
         }
 
         if(echo_mode) {
-            sprintf(buf, "0x%04x %02x\r\n", i, read_byte);
+            sprintf(buf, "%02x", read_byte);
             send_str(buf);
         }
     }

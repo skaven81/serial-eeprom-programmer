@@ -1,8 +1,11 @@
-#!/usr/bin/env python3
+#!/usr/bin/python3
 # vim: ts=4 sts=4 sw=4 expandtab
 
 import serial
 import time
+import argparse
+import sys
+from progress.bar import Bar
 
 class EEPROMprogrammer:
     def __init__(self, port='/dev/ttyUSB0', quiet=False, verbose=False):
@@ -16,7 +19,7 @@ class EEPROMprogrammer:
         self.quiet = quiet
         self.verbose = verbose
         if not self.quiet:
-            print('Initializing programmer on port {}'.format(port))
+            print('Initializing programmer on port {}'.format(port), file=sys.stderr)
         self.ser.reset_output_buffer()
         self.ser.reset_input_buffer()
         self.ser.write(b'\r')
@@ -29,7 +32,7 @@ class EEPROMprogrammer:
             out = self.ser.read_until(b'ready>')
             if out.endswith(b'ready>'):
                 if not self.quiet:
-                    print("Initialized; echo enabled")
+                    print("Initialized; echo enabled", file=sys.stderr)
             else:
                 raise RuntimeError("Did not receive ready> prompt after enabling echo, got [{}]".format(out))
         else:
@@ -46,29 +49,24 @@ class EEPROMprogrammer:
         # Start addr: a000 (40960)
         # End addr: a003 (40963)
         # Requesting 4 bytes now...
-        # 0xa000 62
-        # 0xa001 63
-        # 0xa002 32
-        # 0xa003 33
+        # 62
+        # 63
+        # 32
+        # 33
         # ready>
         read_cmd = "read 0x{:04x} 0x{:04x}\r".format(start_addr, end_addr).encode('UTF-8')
         if self.verbose:
-            print("Sending read command: [{}]".format(read_cmd))
+            print("Sending read command: [{}]".format(read_cmd), file=sys.stderr)
         self.ser.write(read_cmd)
         self.ser.flush()
         self.ser.read_until(b'bytes now...\r\n')
         cur_addr = start_addr
-        read_bytes = [ ]
         while(cur_addr <= end_addr):
-            addr, byte = self.ser.readline().rstrip(b'\r\n').decode().split(' ')
-            if not addr.startswith("0x{:04x}".format(cur_addr)):
-                raise RuntimeError("Expecting address {:04x}, got {}".format(cur_addr, out))
+            byte = self.ser.read(1).decode()
             if self.verbose:
-                print("{}: {}".format(addr, byte))
+                print("{}: {}".format(cur_addr, byte), file=sys.stderr)
             cur_addr += 1
-            read_bytes.append(int(byte, 16))
-
-        return read_bytes
+            yield int(byte, 16)
 
     def write(self, start_addr, data, page_mode=True, data_protect=True):
         if start_addr > 0x7fff:
@@ -115,7 +113,7 @@ class EEPROMprogrammer:
 
         write_cmd = "write 0x{:04x} 0x{:04x}\r".format(start_addr, end_addr).encode('UTF-8')
         if self.verbose:
-            print("Sending write command: [{}]".format(write_cmd))
+            print("Sending write command: [{}]".format(write_cmd), file=sys.stderr)
         self.ser.write(write_cmd)
         self.ser.flush()
 
@@ -126,12 +124,12 @@ class EEPROMprogrammer:
             page_size = int(self.ser.read_until(b'bytes, ').split(b' ')[0])
             remaining = int(self.ser.read_until(b' remaining...\r\n').split(b' ')[0])
             if not self.quiet:
-                print("Sending {} bytes, {} remaining...".format(page_size, remaining))
+                print("Sending {} bytes, {} remaining...".format(page_size, remaining), file=sys.stderr)
 
             # Send next page_size bytes
             for i in range(page_size):
                 if self.verbose:
-                    print("0x{:04x}: {:02x}".format(start_addr + byte_idx, data[byte_idx]))
+                    print("0x{:04x}: {:02x}".format(start_addr + byte_idx, data[byte_idx]), file=sys.stderr)
                 self.ser.write(chr(data[byte_idx]).encode('UTF-8'))
                 byte_idx += 1
             self.ser.flush()
@@ -140,16 +138,89 @@ class EEPROMprogrammer:
             out1 = self.ser.read_until(b'Writing ')
             out2 = self.ser.read_until(b'\r\n').rstrip(b'\r\n')
             if self.verbose:
-                print(out1.decode(), out2.decode())
+                print(out1.decode(), out2.decode(), file=sys.stderr)
             if byte_idx >= len(data):
                 break
         self.ser.read_until(b'ready>')
 
-
 if __name__== "__main__":
-    programmer = EEPROMprogrammer(verbose=True)
-    print("Writing bytes")
-    programmer.write(0x2030, b'abcdefghijklmnopqrstuvwxyz')
-    print("Reading bytes")
-    for byte in programmer.read(0x2030, 26):
-        print("{:02x} {}".format(byte, chr(byte)))
+    parser = argparse.ArgumentParser(description="EEPROM programmer")
+    parser.add_argument('command', help='Execution mode: read or write EEPROM', choices=('read','write',))
+    parser.add_argument('filename', nargs='?', help='Source/dest filename, omit or "-" for STDIN/STDOUT', default='-')
+    parser.add_argument('--address', '-a', default='0x0000', type=lambda a: int(a,0), help='Starting EEPROM address, default=0x0000')
+    parser.add_argument('--length', '-l', default='0', type=lambda l: int(l,0), help='Number of bytes to read/write, default=0=all')
+    parser.add_argument('--verify', action='store_true', default=False, help='Verify written data after writing')
+    parser.add_argument('--verbose', '-v', action='store_true', default=False)
+    parser.add_argument('--quiet', '-q', action='store_true', default=False)
+    parser.add_argument('--port', '-p', default='/dev/ttyUSB0')
+    args = parser.parse_args()
+
+    programmer = EEPROMprogrammer(verbose=args.verbose, quiet=args.quiet, port=args.port)
+    if args.command == 'read':
+        if not args.quiet:
+            print("Reading from EEPROM to {}".format(args.filename), file=sys.stderr)
+        if args.filename == '-':
+            fh = sys.stdout
+        else:
+            fh = open(args.filename, 'wb')
+        wrote_bytes=0
+        if args.length == 0:
+            read_length = 0x7fff - args.address
+        else:
+            read_length = args.length
+        if not args.quiet and not args.verbose:
+            progress_bar = Bar('Reading', max=read_length)
+        for byte in programmer.read(args.address, read_length):
+            if not args.quiet and not args.verbose:
+                progress_bar.next()
+            if args.filename == '-':
+                wrote_bytes += fh.buffer.write(byte.to_bytes(1, 'little'))
+            else:
+                wrote_bytes += fh.write(byte.to_bytes(1, 'little'))
+        fh.close()
+        if not args.quiet and not args.verbose:
+            progress_bar.finish()
+        if not args.quiet:
+            print("Wrote {} bytes to {}".format(wrote_bytes, args.filename), file=sys.stderr)
+    elif args.command == 'write':
+        data = b''
+        if args.filename == '-':
+            data = sys.stdin.buffer.read(-1 if args.length == 0 else args.length)
+        else:
+            with open(args.filename, "rb") as fh:
+                data = fh.read(-1 if args.length == 0 else args.length)
+        if not args.quiet:
+            print("Writing {} bytes to EEPROM from {}.".format(len(data), args.filename), file=sys.stderr)
+        programmer.write(args.address, data)
+        if not args.quiet:
+            print("Done.")
+        if args.verify:
+            if not args.quiet:
+                print("Verifying {} bytes".format(len(data)))
+            if args.verbose:
+                print("ADDR    DATA  EEPROM", file=sys.stderr)
+            if not args.quiet and not args.verbose:
+                progress_bar = Bar('Verifying', max=len(data))
+            programmer.verbose = False
+            programmer.quiet = True
+            data_iter = iter(data)
+            data_ok = True
+            cur_addr = args.address
+            for byte in programmer.read(args.address, len(data)):
+                data_byte = next(data_iter)
+                if args.verbose:
+                    print("0x{:04x}: {:02x} {} {:02x}".format(cur_addr, data_byte, '==' if data_byte == byte else '!=', byte), file=sys.stderr)
+                if byte != data_byte:
+                    data_ok = False
+                cur_addr += 1
+                if not args.quiet and not args.verbose:
+                    progress_bar.next()
+            if not args.quiet and not args.verbose:
+                progress_bar.finish()
+            if not args.quiet:
+                if data_ok:
+                    print("Data verified", file=sys.stderr)
+                else:
+                    print("Data error", file=sys.stderr)
+            if not data_ok:
+                sys.exit(1)
